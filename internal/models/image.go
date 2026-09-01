@@ -6,11 +6,14 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("image not found")
-	ErrNotReady      = errors.New("image is still processing")
-	ErrProcessFailed = errors.New("image processing failed")
-	ErrInvalidFormat = errors.New("unsupported image format")
-	ErrFileTooLarge  = errors.New("file is too large")
+	ErrNotFound        = errors.New("image not found")
+	ErrNotReady        = errors.New("image is still processing")
+	ErrProcessFailed   = errors.New("image processing failed")
+	ErrInvalidFormat   = errors.New("unsupported image format")
+	ErrFilenameIsEmpty = errors.New("filename is empty")
+	ErrInvalidVariant  = errors.New("invalid variant")
+	ErrFileIsEmpty     = errors.New("file is empty")
+	ErrInvalidId       = errors.New("invalid id")
 )
 
 type ImageTask struct {
@@ -25,6 +28,23 @@ const (
 	StatusDone       ImageStatus = "done"
 	StatusFailed     ImageStatus = "failed"
 )
+
+type ImageVariant string
+
+const (
+	VariantResized     ImageVariant = "resized"
+	VariantWatermarked ImageVariant = "watermarked"
+	VariantThumbnail   ImageVariant = "thumbnail"
+)
+
+func (v ImageVariant) IsValid() bool {
+	switch v {
+	case VariantResized, VariantWatermarked, VariantThumbnail:
+		return true
+	default:
+		return false
+	}
+}
 
 type ImageMeta struct {
 	Id           string      `json:"id"`

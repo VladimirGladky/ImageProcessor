@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/gin-gonic/gin v1.9.1
+	github.com/google/uuid v1.6.0
 	github.com/wb-go/wbf v0.0.13
 	go.uber.org/zap v1.28.0
 )
