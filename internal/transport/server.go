@@ -15,10 +15,12 @@ import (
 	"go.uber.org/zap"
 )
 
+const maxUploadSize = 10 << 20
+
 type ImageServiceInterface interface {
-	CreateImageFile(filename string, size int64, file io.Reader) (models.ImageMeta, error)
-	GetModifiedFile(id, variant string) (io.ReadCloser, models.ImageMeta, error)
-	DeleteFile(id string) error
+	CreateImageFile(ctx context.Context, filename string, file io.Reader) (models.ImageMeta, error)
+	GetModifiedFile(ctx context.Context, id string, variant models.ImageVariant) (io.ReadCloser, models.ImageMeta, error)
+	DeleteFile(ctx context.Context, id string) error
 }
 
 type ImageServer struct {
@@ -38,6 +40,7 @@ func NewImageServer(ctx context.Context, cfg *config.Config, srv ImageServiceInt
 func (s *ImageServer) Run() error {
 	eng := ginext.New("release")
 	eng.Use(ginext.Logger())
+	eng.Use(s.injectLogger())
 	eng.Use(s.errorLogger())
 
 	v1 := eng.Group("/api/v1")
@@ -74,10 +77,25 @@ func (s *ImageServer) errorLogger() gin.HandlerFunc {
 	}
 }
 
+func (s *ImageServer) injectLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := context.WithValue(c.Request.Context(), logger.Key, logger.GetLoggerFromCtx(s.ctx))
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
 func (s *ImageServer) CreateImageTaskHandler() ginext.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
+
 		fileHeader, err := c.FormFile("image")
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file is too large"})
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
 			return
 		}
@@ -90,10 +108,17 @@ func (s *ImageServer) CreateImageTaskHandler() ginext.HandlerFunc {
 		}
 		defer file.Close()
 
-		meta, err := s.srv.CreateImageFile(fileHeader.Filename, fileHeader.Size, file)
+		meta, err := s.srv.CreateImageFile(c.Request.Context(), fileHeader.Filename, file)
 		if err != nil {
-			c.Error(err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			switch {
+			case errors.Is(err, models.ErrInvalidFormat),
+				errors.Is(err, models.ErrFilenameIsEmpty),
+				errors.Is(err, models.ErrFileIsEmpty):
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			default:
+				c.Error(err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			}
 			return
 		}
 
@@ -104,18 +129,22 @@ func (s *ImageServer) CreateImageTaskHandler() ginext.HandlerFunc {
 func (s *ImageServer) GetModifiedImageHandler() ginext.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		variant := c.DefaultQuery("variant", "resized")
+		variant := models.ImageVariant(c.DefaultQuery("variant", string(models.VariantResized)))
 
-		file, meta, err := s.srv.GetModifiedFile(id, variant)
+		file, meta, err := s.srv.GetModifiedFile(c.Request.Context(), id, variant)
 		if err != nil {
 			switch {
 			case errors.Is(err, models.ErrNotFound):
 				c.JSON(http.StatusNotFound, gin.H{"error": "image not found"})
 			case errors.Is(err, models.ErrNotReady):
 				c.JSON(http.StatusAccepted, gin.H{"id": id, "status": meta.Status})
+			case errors.Is(err, models.ErrProcessFailed):
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"id": id, "status": meta.Status, "error": meta.Error})
+			case errors.Is(err, models.ErrInvalidId), errors.Is(err, models.ErrInvalidVariant):
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			default:
 				c.Error(err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			}
 			return
 		}
@@ -128,18 +157,20 @@ func (s *ImageServer) GetModifiedImageHandler() ginext.HandlerFunc {
 func (s *ImageServer) DeleteImageHandler() ginext.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		err := s.srv.DeleteFile(id)
+		err := s.srv.DeleteFile(c.Request.Context(), id)
 		if err != nil {
 			switch {
 			case errors.Is(err, models.ErrNotFound):
 				c.JSON(http.StatusNotFound, gin.H{"error": "image not found"})
+			case errors.Is(err, models.ErrInvalidId):
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			default:
 				c.Error(err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			}
 			return
 		}
-		c.JSON(http.StatusNoContent, gin.H{"id": id})
+		c.Status(http.StatusNoContent)
 	}
 }
 
